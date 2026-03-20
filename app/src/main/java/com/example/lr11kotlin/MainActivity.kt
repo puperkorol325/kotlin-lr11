@@ -46,14 +46,24 @@ import retrofit2.http.Query
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
+// SRP: MainActivity теперь отвечает ТОЛЬКО за жизненный цикл
 class MainActivity : ComponentActivity() {
+
+    // DIP: Зависимость от абстракции
+    private val dependencies: PostRepository by lazy {
+        PostDependencies().repository
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             Lr11kotlinTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    PostListPagingScreen(Modifier.padding(innerPadding))
+                    PostListPagingScreen(
+                        postsFlow = dependencies.getPostsFlow(),
+                        modifier = Modifier.padding(innerPadding)
+                    )
                 }
             }
         }
@@ -68,24 +78,44 @@ interface PostApi {
     ): List<Post>
 }
 
-object RetrofitClient {
-    private const val BASE_URL = "https://jsonplaceholder.typicode.com/"
-
-    private val retrofit = Retrofit.Builder()
-        .baseUrl(BASE_URL)
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-
-    val postApi: PostApi = retrofit.create(PostApi::class.java)
+interface PostDataSource {
+    suspend fun getPosts(page: Int, limit: Int): List<Post>
 }
 
-class PostPagingSource(private val api: PostApi) : PagingSource<Int, Post>() {
+class RemotePostDataSource(
+    private val api: PostApi
+) : PostDataSource {
+    override suspend fun getPosts(page: Int, limit: Int): List<Post> {
+        return api.getPosts(page = page, limit = limit)
+    }
+}
+
+interface PostRepository {
+    fun getPostsFlow(): Flow<PagingData<Post>>
+}
+
+class RemotePostRepository(
+    private val pagingSourceFactory: () -> PagingSource<Int, Post>
+) : PostRepository {
+    override fun getPostsFlow(): Flow<PagingData<Post>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = 20,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = pagingSourceFactory
+        ).flow
+    }
+}
+
+class PostPagingSource(
+    private val dataSource: PostDataSource
+) : PagingSource<Int, Post>() {
+
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Post> {
         return try {
             val page = params.key ?: 1
-            android.util.Log.d("PostPaging", "Загрузка страницы $page (по ${params.loadSize} элементов)")
-            val response = api.getPosts(page = page, limit = params.loadSize)
-            android.util.Log.d("PostPaging", "Страница $page загружена: ${response.size} постов")
+            val response = dataSource.getPosts(page = page, limit = params.loadSize)
             LoadResult.Page(
                 data = response,
                 prevKey = if (page == 1) null else page - 1,
@@ -104,30 +134,19 @@ class PostPagingSource(private val api: PostApi) : PagingSource<Int, Post>() {
     }
 }
 
-object PostPagingProvider {
-    private val api = RetrofitClient.postApi
-
-    fun getPostsFlow(): Flow<PagingData<Post>> {
-        return Pager(
-            config = PagingConfig(
-                pageSize = 20,
-                enablePlaceholders = false
-            ),
-            pagingSourceFactory = { PostPagingSource(api) }
-        ).flow
-    }
-}
-
 @Composable
-fun PostListPagingScreen(modifier: Modifier) {
-    val posts = PostPagingProvider.getPostsFlow().collectAsLazyPagingItems()
+fun PostListPagingScreen(
+    postsFlow: Flow<PagingData<Post>>,
+    modifier: Modifier = Modifier,
+    onRetry: () -> Unit = {}
+) {
+    val posts = postsFlow.collectAsLazyPagingItems()
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(16.dp)
     ) {
-
         when (val refresh = posts.loadState.refresh) {
             is LoadState.Loading -> {
                 item {
